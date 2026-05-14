@@ -21,6 +21,11 @@ struct MenuView: View {
         } else {
             Text("Status: \(viewModel.status)")
 
+            if let warning = viewModel.tokenExpiryWarning {
+                Text("⚠️ \(warning)")
+                    .foregroundColor(.orange)
+            }
+
             Divider()
 
             HStack {
@@ -43,8 +48,18 @@ struct MenuView: View {
 
             Divider()
 
-            SparklineView(history: viewModel.history)
-                .padding(.horizontal, 8)
+            SparklineView(
+                history: viewModel.history,
+                useSevenDay: viewModel.sparklineMode == .sevenDay
+            )
+            .padding(.horizontal, 8)
+
+            Picker("", selection: $viewModel.sparklineMode) {
+                Text("5h").tag(SparklineMode.fiveHour)
+                Text("7d").tag(SparklineMode.sevenDay)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 8)
 
             Divider()
 
@@ -60,6 +75,25 @@ struct MenuView: View {
         Button("Refresh Now") {
             Task { await viewModel.refresh() }
         }
+
+        Divider()
+
+        Picker("Poll interval", selection: Binding(
+            get: { viewModel.pollIntervalSecs },
+            set: { viewModel.setPollInterval($0) }
+        )) {
+            Text("30s").tag(30)
+            Text("1m").tag(60)
+            Text("5m").tag(300)
+        }
+        .pickerStyle(.inline)
+
+        Toggle("Launch at Login", isOn: Binding(
+            get: { viewModel.isLaunchAtLoginEnabled },
+            set: { viewModel.setLaunchAtLogin($0) }
+        ))
+
+        Divider()
 
         Button("Quit") {
             NSApplication.shared.terminate(nil)

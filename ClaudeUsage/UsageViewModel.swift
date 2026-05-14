@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import ServiceManagement
 import SwiftUI
 import UserNotifications
 
@@ -7,6 +8,10 @@ struct HistoryPoint: Codable {
     let timestamp: Date
     let s5hPct: Int
     let s7dPct: Int
+}
+
+enum SparklineMode: String {
+    case fiveHour, sevenDay
 }
 
 class UsageViewModel: ObservableObject {
@@ -18,11 +23,18 @@ class UsageViewModel: ObservableObject {
     @Published var lastUpdate: Date? = nil
     @Published var errorMessage: String? = nil
     @Published var history: [HistoryPoint] = []
+    @Published var tokenExpiresAt: Date? = nil
+    @Published var sparklineMode: SparklineMode = .fiveHour
+    @Published var pollIntervalSecs: Int = 60
+
     var lastNotifiedThreshold: Int = 0
+    var tokenExpiryNotified: Bool = false
 
     private var pollingTask: Task<Void, Never>? = nil
 
     init() {
+        let saved = UserDefaults.standard.integer(forKey: "pollIntervalSecs")
+        pollIntervalSecs = saved > 0 ? saved : 60
         loadHistory()
         requestNotificationPermission()
         startPolling()
@@ -34,10 +46,11 @@ class UsageViewModel: ObservableObject {
 
     func startPolling() {
         pollingTask?.cancel()
+        let interval = UInt64(pollIntervalSecs) * 1_000_000_000
         pollingTask = Task {
             await refresh()
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                try? await Task.sleep(nanoseconds: interval)
                 if !Task.isCancelled {
                     await refresh()
                 }
@@ -45,8 +58,31 @@ class UsageViewModel: ObservableObject {
         }
     }
 
+    func setPollInterval(_ secs: Int) {
+        pollIntervalSecs = secs
+        UserDefaults.standard.set(secs, forKey: "pollIntervalSecs")
+        startPolling()
+    }
+
+    var isLaunchAtLoginEnabled: Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            objectWillChange.send()
+        } catch {
+            // silently fail if not running from /Applications
+        }
+    }
+
     func refresh() async {
-        guard let token = readToken() else {
+        guard let credentials = readCredentials() else {
             await MainActor.run {
                 self.errorMessage = "credentials_missing"
                 self.status = "—"
@@ -54,8 +90,13 @@ class UsageViewModel: ObservableObject {
             return
         }
 
+        await MainActor.run {
+            self.tokenExpiresAt = credentials.expiresAt
+            self.checkTokenExpiry()
+        }
+
         do {
-            let result = try await fetchUsage(token: token)
+            let result = try await fetchUsage(token: credentials.token)
             await MainActor.run {
                 self.s5hPct = result.s5hPct
                 self.s5hMins = result.s5hMins
@@ -77,6 +118,30 @@ class UsageViewModel: ObservableObject {
                 self.errorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func checkTokenExpiry() {
+        guard let exp = tokenExpiresAt else { return }
+        let hoursLeft = exp.timeIntervalSinceNow / 3600
+        if hoursLeft < 24 && !tokenExpiryNotified {
+            let h = max(0, Int(hoursLeft))
+            fireNotification(
+                title: "Claude Token Expiring Soon",
+                body: "OAuth token expires in \(h)h. Run `claude` to re-authenticate."
+            )
+            tokenExpiryNotified = true
+        }
+        if hoursLeft >= 24 {
+            tokenExpiryNotified = false
+        }
+    }
+
+    var tokenExpiryWarning: String? {
+        guard let exp = tokenExpiresAt else { return nil }
+        let hoursLeft = exp.timeIntervalSinceNow / 3600
+        if hoursLeft < 0 { return "Token expired — re-authenticate" }
+        if hoursLeft < 24 { return "Token expires in \(max(0, Int(hoursLeft)))h" }
+        return nil
     }
 
     private func checkNotifications() {
@@ -110,7 +175,12 @@ class UsageViewModel: ObservableObject {
         UNUserNotificationCenter.current().add(request)
     }
 
-    private func readToken() -> String? {
+    private struct Credentials {
+        let token: String
+        let expiresAt: Date?
+    }
+
+    private func readCredentials() -> Credentials? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Claude Code-credentials",
@@ -126,7 +196,13 @@ class UsageViewModel: ObservableObject {
               let token = oauth["accessToken"] as? String else {
             return nil
         }
-        return token
+        let expiresAt: Date?
+        if let ms = oauth["expiresAt"] as? Double {
+            expiresAt = Date(timeIntervalSince1970: ms / 1000)
+        } else {
+            expiresAt = nil
+        }
+        return Credentials(token: token, expiresAt: expiresAt)
     }
 
     private struct FetchResult {

@@ -2,9 +2,18 @@ import SwiftUI
 
 struct SparklineView: View {
     let history: [HistoryPoint]
+    var useSevenDay: Bool = false
+
+    private var values: [Double] {
+        history.map { Double(useSevenDay ? $0.s7dPct : $0.s5hPct) }
+    }
+
+    private var latestPct: Int {
+        useSevenDay ? (history.last?.s7dPct ?? 0) : (history.last?.s5hPct ?? 0)
+    }
 
     var body: some View {
-        if history.count < 2 {
+        if values.count < 2 {
             Text("Not enough data yet")
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -12,12 +21,7 @@ struct SparklineView: View {
                 .frame(height: 40)
         } else {
             Canvas { context, size in
-                let values = history.map { Double($0.s5hPct) }
-                let latest = history.last!.s5hPct
-                let color = usageColor(latest)
-
-                let maxY = 100.0
-                let minY = 0.0
+                let color = usageColor(latestPct)
                 let w = size.width
                 let h = size.height
 
@@ -25,7 +29,7 @@ struct SparklineView: View {
                     CGFloat(i) / CGFloat(values.count - 1) * w
                 }
                 func yFor(_ v: Double) -> CGFloat {
-                    CGFloat(1 - (v - minY) / (maxY - minY)) * h
+                    CGFloat(1 - v / 100) * h
                 }
 
                 var linePath = Path()
